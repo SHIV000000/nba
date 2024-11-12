@@ -222,40 +222,69 @@ def run_continuous_predictions():
 def prepare_game_info(game: Dict, api_client: EnhancedNBAApiClient) -> Dict:
     """Prepare comprehensive game information."""
     try:
-        home_team = game['teams']['home']
-        away_team = game['teams']['visitors']
+        # Get team information from the correct structure
+        teams = game.get('teams', {})
+        home_team = teams.get('home', {})
+        away_team = teams.get('away', {})  # Changed from 'visitors' to 'away'
+        
+        # Get scores from the correct structure
+        scores = game.get('scores', {})
+        home_score = scores.get('home', {}).get('points', 0)
+        away_score = scores.get('away', {}).get('points', 0)  # Changed from 'visitors' to 'away'
         
         game_info = {
-            'gameId': game['id'],
-            'home_team': home_team['name'],
-            'away_team': away_team['name'],
-            'current_period': game['periods']['current'],
-            'clock': game['status']['clock'],
-            'home_score': int(game['scores']['home']['points']),
-            'away_score': int(game['scores']['visitors']['points']),
+            'gameId': game.get('id'),
+            'home_team': home_team.get('name'),
+            'away_team': away_team.get('name'),
+            'current_period': game.get('periods', {}).get('current', 1),
+            'clock': game.get('status', {}).get('clock', '12:00'),
+            'home_score': int(home_score) if home_score else 0,
+            'away_score': int(away_score) if away_score else 0,
             'scores': {
-                'home': {'linescore': game['scores']['home']['linescore']},
-                'away': {'linescore': game['scores']['visitors']['linescore']}
+                'home': {'linescore': scores.get('home', {}).get('linescore', [0])},
+                'away': {'linescore': scores.get('away', {}).get('linescore', [0])}
             }
         }
         
-        # Get team stats
-        home_stats = api_client.get_team_stats(home_team['id'])
-        away_stats = api_client.get_team_stats(away_team['id'])
+        # Get team stats with error handling
+        try:
+            home_stats = api_client.get_team_stats(home_team.get('id'))
+        except Exception as e:
+            logging.warning(f"Error getting home team stats: {str(e)}")
+            home_stats = {'statistics': [{}]}
+            
+        try:
+            away_stats = api_client.get_team_stats(away_team.get('id'))
+        except Exception as e:
+            logging.warning(f"Error getting away team stats: {str(e)}")
+            away_stats = {'statistics': [{}]}
         
         # Try alternative stats if primary fails
-        if not home_stats:
-            home_stats = api_client.get_team_stats_alternative(home_team['id'])
-        if not away_stats:
-            away_stats = api_client.get_team_stats_alternative(away_team['id'])
+        if not home_stats or not home_stats.get('statistics'):
+            try:
+                home_stats = api_client.get_team_stats_alternative(home_team.get('id'))
+            except Exception as e:
+                logging.warning(f"Error getting alternative home team stats: {str(e)}")
+                home_stats = {'statistics': [{}]}
+                
+        if not away_stats or not away_stats.get('statistics'):
+            try:
+                away_stats = api_client.get_team_stats_alternative(away_team.get('id'))
+            except Exception as e:
+                logging.warning(f"Error getting alternative away team stats: {str(e)}")
+                away_stats = {'statistics': [{}]}
             
         game_info['home_stats'] = home_stats
         game_info['away_stats'] = away_stats
+        
+        # Log successful preparation
+        logging.info(f"Successfully prepared game info for {game_info['home_team']} vs {game_info['away_team']}")
         
         return game_info
         
     except Exception as e:
         logging.error(f"Error preparing game info: {str(e)}")
+        logging.debug(f"Raw game data: {json.dumps(game, indent=2)}")
         raise
 
 def log_prediction(game_info: Dict, prediction: Dict):
@@ -457,13 +486,14 @@ def process_scheduled_games(games: List[Dict], api_client: EnhancedNBAApiClient,
 def prepare_scheduled_game_info(game: Dict, api_client: EnhancedNBAApiClient) -> Dict:
     """Prepare game information for scheduled games."""
     try:
-        home_team = game['teams']['home']
-        away_team = game['teams']['visitors']
+        teams = game.get('teams', {})
+        home_team = teams.get('home', {})
+        away_team = teams.get('away', {})  # Changed from 'visitors' to 'away'
         
         game_info = {
-            'gameId': game['id'],
-            'home_team': home_team['name'],
-            'away_team': away_team['name'],
+            'gameId': game.get('id'),
+            'home_team': home_team.get('name'),
+            'away_team': away_team.get('name'),
             'current_period': 0,
             'clock': '12:00',
             'home_score': 0,
@@ -476,14 +506,32 @@ def prepare_scheduled_game_info(game: Dict, api_client: EnhancedNBAApiClient) ->
             'status': 'Scheduled'
         }
         
-        # Get team stats
-        home_stats = api_client.get_team_stats(home_team['id'])
-        away_stats = api_client.get_team_stats(away_team['id'])
+        # Get team stats with error handling
+        try:
+            home_stats = api_client.get_team_stats(home_team.get('id'))
+        except Exception as e:
+            logging.warning(f"Error getting home team stats: {str(e)}")
+            home_stats = {'statistics': [{}]}
+            
+        try:
+            away_stats = api_client.get_team_stats(away_team.get('id'))
+        except Exception as e:
+            logging.warning(f"Error getting away team stats: {str(e)}")
+            away_stats = {'statistics': [{}]}
         
-        if not home_stats:
-            home_stats = api_client.get_team_stats_alternative(home_team['id'])
-        if not away_stats:
-            away_stats = api_client.get_team_stats_alternative(away_team['id'])
+        if not home_stats or not home_stats.get('statistics'):
+            try:
+                home_stats = api_client.get_team_stats_alternative(home_team.get('id'))
+            except Exception as e:
+                logging.warning(f"Error getting alternative home team stats: {str(e)}")
+                home_stats = {'statistics': [{}]}
+                
+        if not away_stats or not away_stats.get('statistics'):
+            try:
+                away_stats = api_client.get_team_stats_alternative(away_team.get('id'))
+            except Exception as e:
+                logging.warning(f"Error getting alternative away team stats: {str(e)}")
+                away_stats = {'statistics': [{}]}
             
         game_info['home_stats'] = home_stats
         game_info['away_stats'] = away_stats
@@ -492,6 +540,7 @@ def prepare_scheduled_game_info(game: Dict, api_client: EnhancedNBAApiClient) ->
         
     except Exception as e:
         logging.error(f"Error preparing scheduled game info: {str(e)}")
+        logging.debug(f"Raw game data: {json.dumps(game, indent=2)}")
         raise
 
 def save_scheduled_prediction(game_info: Dict, prediction: Dict):
