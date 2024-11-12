@@ -4,7 +4,7 @@ import json
 import os
 import time
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -207,6 +207,39 @@ def create_metric(label, value):
         </div>
     """
 
+def auto_update():
+    """Function to handle automatic updates"""
+    if 'last_update_time' not in st.session_state:
+        st.session_state.last_update_time = time.time()
+    
+    current_time = time.time()
+    if current_time - st.session_state.last_update_time >= 300:  # 5 minutes
+        try:
+            run_continuous_predictions(timeout_minutes=3)
+            st.session_state.last_update_time = current_time
+            st.session_state.update_counter += 1
+            return True
+        except Exception as e:
+            logging.error(f"Error in auto-update: {str(e)}")
+    return False
+
+def show_update_status():
+    """Show update status in sidebar"""
+    if st.session_state.last_prediction_time:
+        last_update = datetime.fromtimestamp(st.session_state.last_prediction_time)
+        next_update = datetime.fromtimestamp(st.session_state.last_update_time + 300)
+        
+        st.sidebar.markdown("### Update Status")
+        st.sidebar.info(f"Last update: {last_update.strftime('%H:%M:%S')}")
+        st.sidebar.info(f"Next update: {next_update.strftime('%H:%M:%S')}")
+        
+        # Show countdown
+        remaining_time = int(300 - (time.time() - st.session_state.last_update_time))
+        if remaining_time > 0:
+            minutes = remaining_time // 60
+            seconds = remaining_time % 60
+            st.sidebar.markdown(f"Next update in: {minutes}m {seconds}s")
+
 # 4. Core functionality
 def display_live_game_card(prediction, key_prefix=None):
     """Enhanced live game card display with unique keys"""
@@ -300,65 +333,71 @@ def display_scheduled_game_card(prediction, key_prefix=None):
                 st.write(f"- Probability: {pred['win_probability']}")
 
 def clean_old_predictions():
-    """Delete old prediction files"""
+    """Delete old prediction files and keep only the latest for each game"""
     directories = ["predictions/scheduled", "predictions/live"]
     for directory in directories:
         if os.path.exists(directory):
+            # Group files by game ID
+            game_files = {}
             for file in os.listdir(directory):
-                file_path = os.path.join(directory, file)
-                try:
-                    # Delete file if it's older than 5 minutes
-                    if time.time() - os.path.getmtime(file_path) > 300:  # 300 seconds = 5 minutes
+                if file.endswith(".json"):
+                    game_id = file.split('_')[1]  # Extract game ID from filename
+                    file_path = os.path.join(directory, file)
+                    if game_id not in game_files:
+                        game_files[game_id] = []
+                    game_files[game_id].append((file_path, os.path.getmtime(file_path)))
+            
+            # Keep only the latest file for each game
+            for game_id, files in game_files.items():
+                # Sort files by modification time
+                sorted_files = sorted(files, key=lambda x: x[1])
+                # Remove all but the latest file
+                for file_path, _ in sorted_files[:-1]:
+                    try:
                         os.remove(file_path)
-                except Exception as e:
-                    st.error(f"Error deleting old prediction file {file}: {str(e)}")
-
-def auto_refresh():
-    while True:
-        time.sleep(300)  # Wait for 5 minutes instead of 1 minute
-        st.experimental_rerun()
+                        logging.debug(f"Removed old prediction file: {file_path}")
+                    except Exception as e:
+                        logging.error(f"Error deleting file {file_path}: {str(e)}")
 
 def load_predictions(include_live=True):
-    """Load both scheduled and live game predictions from the respective directories"""
+    """Load only the latest predictions for each game"""
     predictions = []
     current_time = time.time()
     
+    # Helper function to get latest file for each game
+    def get_latest_predictions(directory):
+        game_files = {}
+        if os.path.exists(directory):
+            for file in os.listdir(directory):
+                if file.endswith(".json"):
+                    game_id = file.split('_')[1]
+                    file_path = os.path.join(directory, file)
+                    mod_time = os.path.getmtime(file_path)
+                    if current_time - mod_time <= 300:  # Only files less than 5 minutes old
+                        if game_id not in game_files or mod_time > game_files[game_id][1]:
+                            game_files[game_id] = (file_path, mod_time)
+        return [path for path, _ in game_files.values()]
+    
     # Load scheduled game predictions
-    scheduled_dir = "predictions/scheduled"
-    if os.path.exists(scheduled_dir):
-        for file in os.listdir(scheduled_dir):
-            if file.endswith(".json"):
-                file_path = os.path.join(scheduled_dir, file)
-                # Only load files less than 5 minutes old
-                if current_time - os.path.getmtime(file_path) <= 300:
-                    try:
-                        with open(file_path, 'r') as f:
-                            pred = json.load(f)
-                            pred['is_live'] = False
-                            predictions.append(pred)
-                    except json.JSONDecodeError:
-                        st.warning(f"Error loading prediction file: {file}")
-                    except Exception as e:
-                        st.error(f"Unexpected error loading {file}: {str(e)}")
+    for file_path in get_latest_predictions("predictions/scheduled"):
+        try:
+            with open(file_path, 'r') as f:
+                pred = json.load(f)
+                pred['is_live'] = False
+                predictions.append(pred)
+        except Exception as e:
+            logging.error(f"Error loading prediction file {file_path}: {str(e)}")
     
     # Load live game predictions
     if include_live:
-        live_dir = "predictions/live"
-        if os.path.exists(live_dir):
-            for file in os.listdir(live_dir):
-                if file.endswith(".json"):
-                    file_path = os.path.join(live_dir, file)
-                    # Only load files less than 5 minutes old
-                    if current_time - os.path.getmtime(file_path) <= 300:
-                        try:
-                            with open(file_path, 'r') as f:
-                                pred = json.load(f)
-                                pred['is_live'] = True
-                                predictions.append(pred)
-                        except json.JSONDecodeError:
-                            st.warning(f"Error loading live prediction file: {file}")
-                        except Exception as e:
-                            st.error(f"Unexpected error loading {file}: {str(e)}")
+        for file_path in get_latest_predictions("predictions/live"):
+            try:
+                with open(file_path, 'r') as f:
+                    pred = json.load(f)
+                    pred['is_live'] = True
+                    predictions.append(pred)
+            except Exception as e:
+                logging.error(f"Error loading prediction file {file_path}: {str(e)}")
     
     # Sort predictions by date/time
     predictions.sort(key=lambda x: x['game_info'].get('scheduled_start', ''))
@@ -404,71 +443,72 @@ def show_prediction_status():
         last_update = datetime.fromtimestamp(st.session_state.last_prediction_time)
         st.sidebar.info(f"✅ Last prediction: {last_update.strftime('%H:%M:%S')}")
 
-def cleanup_prediction_service():
-    """Clean up prediction service resources"""
-    try:
-        # Reset prediction state
-        if 'is_predicting' in st.session_state:
-            st.session_state.is_predicting = False
-        
-        # Clean old predictions
-        clean_old_predictions()
-        
-    except Exception as e:
-        logging.error(f"Error in cleanup: {str(e)}")
+def cleanup():
+    """Clean up resources when the app stops"""
+    if hasattr(st.session_state, 'auto_refresh_thread') and st.session_state.auto_refresh_thread:
+        st.session_state.auto_refresh_thread = None
+    clean_old_predictions()
 
-# Register cleanup function
-atexit.register(cleanup_prediction_service)
+atexit.register(cleanup)
 
 def initialize_session_state():
-    if 'last_update' not in st.session_state:
-        st.session_state.last_update = datetime.now()
-    if 'update_count' not in st.session_state:
-        st.session_state.update_count = 0
+    """Initialize all session state variables"""
+    if 'last_prediction_time' not in st.session_state:
+        st.session_state.last_prediction_time = time.time()
+    if 'last_update_time' not in st.session_state:
+        st.session_state.last_update_time = time.time()
+    if 'is_predicting' not in st.session_state:
+        st.session_state.is_predicting = False
+    if 'update_counter' not in st.session_state:
+        st.session_state.update_counter = 0
+    if 'auto_refresh_thread' not in st.session_state:
+        st.session_state.auto_refresh_thread = None
+
+def show_auto_refresh_status():
+    """Show auto-refresh status in sidebar"""
+    if st.session_state.auto_refresh_thread is not None:
+        st.sidebar.success("🔄 Auto-refresh is active")
+        next_update = datetime.fromtimestamp(st.session_state.last_prediction_time + 300)
+        st.sidebar.info(f"Next update at: {next_update.strftime('%H:%M:%S')}")
 
 # 5. Main function
 def main():
     st.title("🏀 NBA Game Predictions Dashboard")
     
     # Initialize session state
-    if 'last_prediction_time' not in st.session_state:
-        st.session_state.last_prediction_time = 0
-    if 'is_predicting' not in st.session_state:
-        st.session_state.is_predicting = False
-    if 'update_counter' not in st.session_state:
-        st.session_state.update_counter = 0
+    initialize_session_state()
     
     # Sidebar controls
     st.sidebar.title("Controls")
-    auto_update = st.sidebar.checkbox("Auto Update (5 min)", value=True)
+    auto_update_enabled = st.sidebar.checkbox("Enable Auto Update (5 min)", value=True)
     manual_update = st.sidebar.button("Manual Update")
     
-    current_time = time.time()
-    should_update = (
-        manual_update or 
-        (auto_update and current_time - st.session_state.last_prediction_time >= 300) or
-        not st.session_state.last_prediction_time
-    )
+    # Auto-update logic
+    if auto_update_enabled:
+        if auto_update():
+            st.rerun()
     
-    if should_update and not st.session_state.is_predicting:
+    # Manual update logic
+    if manual_update and not st.session_state.is_predicting:
         with st.spinner("Updating predictions..."):
             try:
                 st.session_state.is_predicting = True
                 clean_old_predictions()
-                
-                if run_continuous_predictions(timeout_minutes=3):
-                    st.session_state.last_prediction_time = current_time
-                    st.session_state.update_counter += 1  # Increment update counter
-                    st.success("Predictions updated successfully!")
-                    time.sleep(1)  # Brief pause to ensure files are written
-                    st.experimental_rerun()  # Force refresh
-                
+                run_continuous_predictions(timeout_minutes=3)
+                st.session_state.last_prediction_time = time.time()
+                st.session_state.update_counter += 1
+                st.success("Predictions updated successfully!")
+                time.sleep(1)
+                st.rerun()
             except Exception as e:
                 st.error(f"Error updating predictions: {str(e)}")
             finally:
                 st.session_state.is_predicting = False
     
-    # Load and display predictions with the update counter as a key
+    # Show update status
+    show_update_status()
+    
+    # Load and display predictions
     all_predictions = load_predictions()
     display_predictions(all_predictions, key=st.session_state.update_counter)
 
