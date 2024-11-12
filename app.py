@@ -10,6 +10,8 @@ from plotly.subplots import make_subplots
 import pandas as pd
 from test_predictions import run_continuous_predictions, LiveGamePredictor, NBAPredictor
 from api_client import EnhancedNBAApiClient
+import atexit
+import logging
 
 # Enhanced page config
 st.set_page_config(
@@ -208,16 +210,20 @@ def display_live_game_card(prediction):
             """, unsafe_allow_html=True)
         
         # Prediction visualization
+        home_prob = pred_info['win_probability'] if pred_info['predicted_winner'] == game_info['home_team'] else (1 - pred_info['win_probability'])
+        away_prob = pred_info['win_probability'] if pred_info['predicted_winner'] == game_info['away_team'] else (1 - pred_info['win_probability'])
+        
         st.plotly_chart(
             create_team_comparison_chart(
                 game_info['home_team'],
                 game_info['away_team'],
-                pred_info['win_probability'] if pred_info['predicted_winner'] == game_info['home_team'] else 1-pred_info['win_probability'],
-                pred_info['win_probability'] if pred_info['predicted_winner'] == game_info['away_team'] else 1-pred_info['win_probability']
+                home_prob,
+                away_prob
             ),
             use_container_width=True
         )
         
+        # Additional prediction details
         st.markdown('</div>', unsafe_allow_html=True)
 
 
@@ -323,142 +329,101 @@ def load_predictions(include_live=True):
 def main():
     st.title("🏀 NBA Game Predictions Dashboard")
     
-    # Start auto-refresh thread
-    if 'auto_refresh_started' not in st.session_state:
-        st.session_state.auto_refresh_started = True
-        threading.Thread(target=auto_refresh, daemon=True).start()
+    # Initialize session state
+    if 'last_prediction_time' not in st.session_state:
+        st.session_state.last_prediction_time = 0
+    if 'is_predicting' not in st.session_state:
+        st.session_state.is_predicting = False
+    if 'update_counter' not in st.session_state:
+        st.session_state.update_counter = 0
     
-    # Sidebar
+    # Sidebar controls
     st.sidebar.title("Controls")
     auto_update = st.sidebar.checkbox("Auto Update (5 min)", value=True)
     manual_update = st.sidebar.button("Manual Update")
     
-    # Clean old predictions before loading new ones
-    clean_old_predictions()
+    current_time = time.time()
+    should_update = (
+        manual_update or 
+        (auto_update and current_time - st.session_state.last_prediction_time >= 300) or
+        not st.session_state.last_prediction_time
+    )
     
-    if manual_update or (auto_update and time.time() % 300 < 1):
+    if should_update and not st.session_state.is_predicting:
         with st.spinner("Updating predictions..."):
-            api_client = EnhancedNBAApiClient('89ce3afd40msh6fe1b4a34da6f2ep1f2bcdjsn4a84afd6514c')
-            base_predictor = NBAPredictor('saved_models')
-            live_predictor = LiveGamePredictor(base_predictor)
-            run_continuous_predictions()
+            try:
+                st.session_state.is_predicting = True
+                clean_old_predictions()
+                
+                if run_continuous_predictions(timeout_minutes=3):
+                    st.session_state.last_prediction_time = current_time
+                    st.session_state.update_counter += 1  # Increment update counter
+                    st.success("Predictions updated successfully!")
+                    time.sleep(1)  # Brief pause to ensure files are written
+                    st.experimental_rerun()  # Force refresh
+                
+            except Exception as e:
+                st.error(f"Error updating predictions: {str(e)}")
+            finally:
+                st.session_state.is_predicting = False
     
-    # Load predictions
+    # Load and display predictions with the update counter as a key
     all_predictions = load_predictions()
-    live_games = [p for p in all_predictions if p.get('is_live', False)]
-    scheduled_games = [p for p in all_predictions if not p.get('is_live', False)]
+    display_predictions(all_predictions, key=st.session_state.update_counter)
+
+def display_predictions(predictions, key=None):
+    """Display predictions with a key for proper updates"""
+    live_games = [p for p in predictions if p.get('is_live', False)]
+    scheduled_games = [p for p in predictions if not p.get('is_live', False)]
     
     # Display metrics
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Live Games", len(live_games))
+        st.metric(f"Live Games_{key}", len(live_games))
     with col2:
-        st.metric("Scheduled Games", len(scheduled_games))
+        st.metric(f"Scheduled Games_{key}", len(scheduled_games))
     with col3:
-        st.metric("High Confidence Predictions", 
-                 sum(1 for p in scheduled_games if p['prediction']['confidence_level'] == 'High'))
+        high_confidence = sum(1 for p in scheduled_games 
+                            if p['prediction'].get('confidence_level') == 'High')
+        st.metric(f"High Confidence_{key}", high_confidence)
     with col4:
-        st.metric("Last Update", datetime.now().strftime("%H:%M:%S"))
+        st.metric(f"Last Update_{key}", 
+                 datetime.fromtimestamp(st.session_state.last_prediction_time).strftime("%H:%M:%S"))
     
-    # Live Games Section
-    st.markdown("## 🔴 Live Games")
+    # Display games
     if live_games:
-        for prediction in live_games:
-            with st.container():
-                st.markdown("---")
-                display_live_game_card(prediction)
-    else:
-        st.info("No live games at the moment")
+        st.markdown("## 🔴 Live Games")
+        for game in live_games:
+            display_live_game_card(game)
     
-    # Scheduled Games Section
-    st.markdown("## 📅 Scheduled Games")
     if scheduled_games:
-        # Filter options
-        st.markdown("### 🔍 Filter Predictions")
-        col1, col2 = st.columns(2)
-        with col1:
-            confidence_filter = st.multiselect(
-                "Confidence Level",
-                ["High", "Medium", "Low"],
-                default=["High", "Medium", "Low"]
-            )
-        with col2:
-            sort_by = st.selectbox(
-                "Sort By",
-                ["Start Time", "Confidence", "Win Probability"]
-            )
-        
-        # Sort predictions
-        if sort_by == "Start Time":
-            scheduled_games.sort(key=lambda x: x['game_info']['scheduled_start'])
-        elif sort_by == "Confidence":
-            confidence_map = {"High": 3, "Medium": 2, "Low": 1}
-            scheduled_games.sort(key=lambda x: confidence_map[x['prediction']['confidence_level']], 
-                               reverse=True)
-        else:
-            scheduled_games.sort(key=lambda x: x['prediction']['win_probability'], 
-                               reverse=True)
-        
-        # Display filtered predictions
-        for prediction in scheduled_games:
-            if prediction['prediction']['confidence_level'] in confidence_filter:
-                with st.container():
-                    st.markdown("---")
-                    display_scheduled_game_card(prediction)
+        st.markdown("## 📅 Scheduled Games")
+        for game in scheduled_games:
+            display_scheduled_game_card(game)
+
+def show_prediction_status():
+    """Show prediction service status"""
+    if st.session_state.is_predicting:
+        st.sidebar.warning("⏳ Prediction service is running...")
     else:
-        st.info("No scheduled games found")
-    
-    # Additional Analysis Section
-    if scheduled_games or live_games:
-        st.markdown("## 📊 Analysis")
-        col1, col2 = st.columns(2)
+        last_update = datetime.fromtimestamp(st.session_state.last_prediction_time)
+        st.sidebar.info(f"✅ Last prediction: {last_update.strftime('%H:%M:%S')}")
+
+def cleanup_prediction_service():
+    """Clean up prediction service resources"""
+    try:
+        # Reset prediction state
+        if 'is_predicting' in st.session_state:
+            st.session_state.is_predicting = False
         
-        with col1:
-            st.markdown("### Model Performance")
-            model_stats = {}
-            for pred in scheduled_games + live_games:
-                for model, model_pred in pred['prediction'].get('model_predictions', {}).items():
-                    if model not in model_stats:
-                        model_stats[model] = {'total': 0, 'agreement': 0}
-                    model_stats[model]['total'] += 1
-                    if model_pred['predicted_winner'] == pred['prediction']['predicted_winner']:
-                        model_stats[model]['agreement'] += 1
-            
-            # Display model agreement stats
-            for model, stats in model_stats.items():
-                agreement_rate = stats['agreement'] / stats['total'] if stats['total'] > 0 else 0
-                st.write(f"**{model}** agreement rate: {agreement_rate:.1%}")
+        # Clean old predictions
+        clean_old_predictions()
         
-        with col2:
-            st.markdown("### Prediction Distribution")
-            # Create histogram of win probabilities
-            import plotly.express as px
-            probs = [p['prediction']['win_probability'] for p in scheduled_games]
-            if probs:
-                fig = px.histogram(
-                    probs, 
-                    title="Distribution of Win Probabilities",
-                    labels={'value': 'Win Probability', 'count': 'Number of Games'},
-                    nbins=20
-                )
-                st.plotly_chart(fig)
-    
-    # Footer with last update time
-    st.markdown("---")
-    st.markdown(f"*Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
-    
-    # Update auto-refresh JavaScript to 5 minutes
-    if auto_update:
-        st.markdown(
-            """
-            <script>
-                var timeout = setTimeout(function() {
-                    window.location.reload();
-                }, 300000);  // 300000 ms = 5 minutes
-            </script>
-            """,
-            unsafe_allow_html=True
-        )
+    except Exception as e:
+        logging.error(f"Error in cleanup: {str(e)}")
+
+# Register cleanup function
+atexit.register(cleanup_prediction_service)
 
 def initialize_session_state():
     if 'last_update' not in st.session_state:
