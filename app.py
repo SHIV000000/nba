@@ -209,36 +209,62 @@ def create_metric(label, value):
 
 def auto_update():
     """Function to handle automatic updates"""
-    if 'last_update_time' not in st.session_state:
-        st.session_state.last_update_time = time.time()
-    
     current_time = time.time()
-    if current_time - st.session_state.last_update_time >= 300:  # 5 minutes
+    
+    # Initialize last update time if not exists
+    if 'last_update_time' not in st.session_state:
+        st.session_state.last_update_time = current_time
+        return False
+    
+    # Check if 5 minutes have passed
+    time_elapsed = current_time - st.session_state.last_update_time
+    if time_elapsed >= 300:  # 5 minutes in seconds
         try:
+            logging.info("Starting auto-update...")
+            st.session_state.is_predicting = True
+            clean_old_predictions()
             run_continuous_predictions(timeout_minutes=3)
             st.session_state.last_update_time = current_time
+            st.session_state.last_prediction_time = current_time
             st.session_state.update_counter += 1
+            st.session_state.is_predicting = False
+            logging.info("Auto-update completed successfully")
             return True
         except Exception as e:
             logging.error(f"Error in auto-update: {str(e)}")
+            st.session_state.is_predicting = False
+            return False
     return False
 
 def show_update_status():
-    """Show update status in sidebar"""
-    if st.session_state.last_prediction_time:
-        last_update = datetime.fromtimestamp(st.session_state.last_prediction_time)
-        next_update = datetime.fromtimestamp(st.session_state.last_update_time + 300)
+    """Show update status in sidebar with countdown timer"""
+    if not hasattr(st.session_state, 'last_update_time'):
+        return
         
-        st.sidebar.markdown("### Update Status")
-        st.sidebar.info(f"Last update: {last_update.strftime('%H:%M:%S')}")
-        st.sidebar.info(f"Next update: {next_update.strftime('%H:%M:%S')}")
-        
-        # Show countdown
-        remaining_time = int(300 - (time.time() - st.session_state.last_update_time))
-        if remaining_time > 0:
-            minutes = remaining_time // 60
-            seconds = remaining_time % 60
-            st.sidebar.markdown(f"Next update in: {minutes}m {seconds}s")
+    current_time = time.time()
+    time_since_last_update = current_time - st.session_state.last_update_time
+    time_until_next_update = max(300 - time_since_last_update, 0)
+    
+    minutes = int(time_until_next_update // 60)
+    seconds = int(time_until_next_update % 60)
+    
+    st.sidebar.markdown("### Update Status")
+    
+    # Show last update time
+    last_update = datetime.fromtimestamp(st.session_state.last_update_time)
+    st.sidebar.info(f"Last update: {last_update.strftime('%H:%M:%S')}")
+    
+    # Show countdown
+    if time_until_next_update > 0:
+        st.sidebar.warning(f"Next update in: {minutes:02d}:{seconds:02d}")
+    else:
+        st.sidebar.success("Update due...")
+    
+    # Show prediction status
+    if st.session_state.is_predicting:
+        st.sidebar.warning("⏳ Predictions in progress...")
+    else:
+        st.sidebar.success("✅ Ready for next update")
 
 # 4. Core functionality
 def display_live_game_card(prediction, key_prefix=None):
@@ -310,7 +336,7 @@ def display_scheduled_game_card(prediction, key_prefix=None):
         with col1:
             st.markdown("### 🏀 Teams")
             st.write(f"**Home:** {game_info['home_team']}")
-            st.write(f"**Away:** {game_info['away_team']}")
+            st.write(f"**Away:** {game_info.get('away_team', 'TBD')}")
             st.write(f"**Start Time:** {game_info['scheduled_start']}")
             
         with col2:
@@ -326,7 +352,7 @@ def display_scheduled_game_card(prediction, key_prefix=None):
                           if model['predicted_winner'] == pred_info['predicted_winner'])
             st.write(f"**Models in Agreement:** {agreement}/{total_models}")
         
-        with st.expander("View Detailed Model Predictions", key=f"expander_{unique_key}"):
+        with st.expander(f"View Detailed Model Predictions ({game_info['id']})"):
             for model, pred in pred_info['model_predictions'].items():
                 st.write(f"**{model}:**")
                 st.write(f"- Winner: {pred['predicted_winner']}")
@@ -364,7 +390,6 @@ def load_predictions(include_live=True):
     predictions = []
     current_time = time.time()
     
-    # Helper function to get latest file for each game
     def get_latest_predictions(directory):
         game_files = {}
         if os.path.exists(directory):
@@ -378,36 +403,48 @@ def load_predictions(include_live=True):
                             game_files[game_id] = (file_path, mod_time)
         return [path for path, _ in game_files.values()]
     
-    # Load scheduled game predictions
+    # Load and validate predictions
     for file_path in get_latest_predictions("predictions/scheduled"):
         try:
             with open(file_path, 'r') as f:
                 pred = json.load(f)
+                # Validate required fields
+                if not pred['game_info'].get('away_team'):
+                    pred['game_info']['away_team'] = 'TBD'
+                if not pred['game_info'].get('home_team'):
+                    continue  # Skip invalid predictions
                 pred['is_live'] = False
                 predictions.append(pred)
         except Exception as e:
             logging.error(f"Error loading prediction file {file_path}: {str(e)}")
     
-    # Load live game predictions
+    # Load live game predictions with validation
     if include_live:
         for file_path in get_latest_predictions("predictions/live"):
             try:
                 with open(file_path, 'r') as f:
                     pred = json.load(f)
+                    if not all(key in pred['game_info'] for key in ['home_team', 'away_team']):
+                        continue  # Skip invalid predictions
                     pred['is_live'] = True
                     predictions.append(pred)
             except Exception as e:
                 logging.error(f"Error loading prediction file {file_path}: {str(e)}")
     
-    # Sort predictions by date/time
+    # Sort valid predictions by date/time
     predictions.sort(key=lambda x: x['game_info'].get('scheduled_start', ''))
-    
     return predictions
 
 def display_predictions(predictions, key=None):
     """Display predictions with custom metrics"""
-    live_games = [p for p in predictions if p.get('is_live', False)]
-    scheduled_games = [p for p in predictions if not p.get('is_live', False)]
+    # Filter out invalid predictions
+    valid_predictions = [
+        p for p in predictions 
+        if p['game_info'].get('home_team') and p['game_info'].get('away_team', 'TBD') != 'None'
+    ]
+    
+    live_games = [p for p in valid_predictions if p.get('is_live', False)]
+    scheduled_games = [p for p in valid_predictions if not p.get('is_live', False)]
     
     # Display metrics using custom containers
     col1, col2, col3, col4 = st.columns(4)
@@ -461,8 +498,8 @@ def initialize_session_state():
         st.session_state.is_predicting = False
     if 'update_counter' not in st.session_state:
         st.session_state.update_counter = 0
-    if 'auto_refresh_thread' not in st.session_state:
-        st.session_state.auto_refresh_thread = None
+    if 'auto_update_enabled' not in st.session_state:
+        st.session_state.auto_update_enabled = True
 
 def show_auto_refresh_status():
     """Show auto-refresh status in sidebar"""
@@ -470,6 +507,48 @@ def show_auto_refresh_status():
         st.sidebar.success("🔄 Auto-refresh is active")
         next_update = datetime.fromtimestamp(st.session_state.last_prediction_time + 300)
         st.sidebar.info(f"Next update at: {next_update.strftime('%H:%M:%S')}")
+
+# Logging configuration
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("app.log"),
+        logging.StreamHandler()
+    ]
+)
+
+def log_update_cycle():
+    """Log update cycle information"""
+    current_time = time.time()
+    time_since_last_update = current_time - st.session_state.last_update_time
+    
+    logging.info(f"""
+    Update Cycle Status:
+    - Current Time: {datetime.fromtimestamp(current_time).strftime('%H:%M:%S')}
+    - Last Update: {datetime.fromtimestamp(st.session_state.last_update_time).strftime('%H:%M:%S')}
+    - Time Since Last Update: {time_since_last_update:.1f} seconds
+    - Auto-Update Enabled: {st.session_state.get('auto_update_enabled', False)}
+    - Is Predicting: {st.session_state.get('is_predicting', False)}
+    """)
+
+def create_timer():
+    """Create a hidden timer component that triggers updates"""
+    if 'start_time' not in st.session_state:
+        st.session_state.start_time = time.time()
+        st.session_state.iterations = 0
+
+    # Update every second
+    placeholder = st.empty()
+    current_time = time.time()
+    elapsed = int(current_time - st.session_state.start_time)
+    
+    if elapsed >= 300:  # 5 minutes
+        st.session_state.start_time = current_time
+        st.session_state.iterations += 1
+        return True
+    
+    return False
 
 # 5. Main function
 def main():
@@ -483,36 +562,108 @@ def main():
     auto_update_enabled = st.sidebar.checkbox("Enable Auto Update (5 min)", value=True)
     manual_update = st.sidebar.button("Manual Update")
     
+    # Create timer placeholder
+    timer_placeholder = st.empty()
+    
     # Auto-update logic
     if auto_update_enabled:
-        if auto_update():
-            st.rerun()
+        if create_timer():
+            try:
+                with st.spinner("Running scheduled update..."):
+                    clean_old_predictions()
+                    run_continuous_predictions(timeout_minutes=3)
+                    st.session_state.last_prediction_time = time.time()
+                    st.session_state.update_counter += 1
+                st.rerun()
+            except Exception as e:
+                st.error(f"Auto-update failed: {str(e)}")
     
     # Manual update logic
-    if manual_update and not st.session_state.is_predicting:
+    if manual_update:
         with st.spinner("Updating predictions..."):
             try:
-                st.session_state.is_predicting = True
                 clean_old_predictions()
                 run_continuous_predictions(timeout_minutes=3)
                 st.session_state.last_prediction_time = time.time()
+                st.session_state.start_time = time.time()  # Reset timer
                 st.session_state.update_counter += 1
-                st.success("Predictions updated successfully!")
+                st.success("Manual update completed!")
                 time.sleep(1)
                 st.rerun()
             except Exception as e:
-                st.error(f"Error updating predictions: {str(e)}")
-            finally:
-                st.session_state.is_predicting = False
+                st.error(f"Manual update failed: {str(e)}")
     
-    # Show update status
+    # Show update status with countdown
     show_update_status()
     
     # Load and display predictions
     all_predictions = load_predictions()
     display_predictions(all_predictions, key=st.session_state.update_counter)
+    
+    # Force rerun every second to update countdown
+    time.sleep(1)
+    st.rerun()
+
+def show_update_status():
+    """Show update status with accurate countdown"""
+    if 'start_time' not in st.session_state:
+        return
+        
+    current_time = time.time()
+    elapsed = current_time - st.session_state.start_time
+    time_remaining = max(300 - elapsed, 0)
+    
+    minutes = int(time_remaining // 60)
+    seconds = int(time_remaining % 60)
+    
+    st.sidebar.markdown("### Update Status")
+    
+    # Show last update time
+    if 'last_prediction_time' in st.session_state:
+        last_update = datetime.fromtimestamp(st.session_state.last_prediction_time)
+        st.sidebar.info(f"Last update: {last_update.strftime('%H:%M:%S')}")
+    
+    # Show countdown
+    if time_remaining > 0:
+        st.sidebar.warning(f"Next update in: {minutes:02d}:{seconds:02d}")
+        
+        # Add a progress bar
+        progress = 1 - (time_remaining / 300)
+        st.sidebar.progress(progress)
+    else:
+        st.sidebar.success("Update due...")
+
+# 4. Update Session State Initialization
+def initialize_session_state():
+    """Initialize all session state variables"""
+    current_time = time.time()
+    
+    if 'start_time' not in st.session_state:
+        st.session_state.start_time = current_time
+    if 'last_prediction_time' not in st.session_state:
+        st.session_state.last_prediction_time = current_time
+    if 'update_counter' not in st.session_state:
+        st.session_state.update_counter = 0
+    if 'iterations' not in st.session_state:
+        st.session_state.iterations = 0
+
+# Add a Heartbeat Function
+def heartbeat():
+    """Create a heartbeat to ensure continuous updates"""
+    if 'heartbeat' not in st.session_state:
+        st.session_state.heartbeat = time.time()
+    
+    current_time = time.time()
+    if current_time - st.session_state.heartbeat >= 1:
+        st.session_state.heartbeat = current_time
+        return True
+    return False
 
 # 6. Entry point
 if __name__ == "__main__":
     initialize_session_state()
     main()
+
+
+
+
