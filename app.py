@@ -253,45 +253,66 @@ def display_scheduled_game_card(prediction):
             st.write(f"- Winner: {pred['predicted_winner']}")
             st.write(f"- Probability: {pred['win_probability']}")
 
+def clean_old_predictions():
+    """Delete old prediction files"""
+    directories = ["predictions/scheduled", "predictions/live"]
+    for directory in directories:
+        if os.path.exists(directory):
+            for file in os.listdir(directory):
+                file_path = os.path.join(directory, file)
+                try:
+                    # Delete file if it's older than 5 minutes
+                    if time.time() - os.path.getmtime(file_path) > 300:  # 300 seconds = 5 minutes
+                        os.remove(file_path)
+                except Exception as e:
+                    st.error(f"Error deleting old prediction file {file}: {str(e)}")
+
 def auto_refresh():
     while True:
-        time.sleep(60)  # Wait for 60 seconds
+        time.sleep(300)  # Wait for 5 minutes instead of 1 minute
         st.experimental_rerun()
 
 def load_predictions(include_live=True):
     """Load both scheduled and live game predictions from the respective directories"""
     predictions = []
+    current_time = time.time()
     
     # Load scheduled game predictions
     scheduled_dir = "predictions/scheduled"
     if os.path.exists(scheduled_dir):
         for file in os.listdir(scheduled_dir):
             if file.endswith(".json"):
-                try:
-                    with open(os.path.join(scheduled_dir, file), 'r') as f:
-                        pred = json.load(f)
-                        pred['is_live'] = False
-                        predictions.append(pred)
-                except json.JSONDecodeError:
-                    st.warning(f"Error loading prediction file: {file}")
-                except Exception as e:
-                    st.error(f"Unexpected error loading {file}: {str(e)}")
+                file_path = os.path.join(scheduled_dir, file)
+                # Only load files less than 5 minutes old
+                if current_time - os.path.getmtime(file_path) <= 300:
+                    try:
+                        with open(file_path, 'r') as f:
+                            pred = json.load(f)
+                            pred['is_live'] = False
+                            predictions.append(pred)
+                    except json.JSONDecodeError:
+                        st.warning(f"Error loading prediction file: {file}")
+                    except Exception as e:
+                        st.error(f"Unexpected error loading {file}: {str(e)}")
     
     # Load live game predictions
     if include_live:
-        live_dir = "predictions/live"  # Adjust this path according to your structure
+        live_dir = "predictions/live"
         if os.path.exists(live_dir):
             for file in os.listdir(live_dir):
                 if file.endswith(".json"):
-                    try:
-                        with open(os.path.join(live_dir, file), 'r') as f:
-                            pred = json.load(f)
-                            pred['is_live'] = True
-                            predictions.append(pred)
-                    except json.JSONDecodeError:
-                        st.warning(f"Error loading live prediction file: {file}")
-                    except Exception as e:
-                        st.error(f"Unexpected error loading {file}: {str(e)}")
+                    file_path = os.path.join(live_dir, file)
+                    # Only load files less than 5 minutes old
+                    if current_time - os.path.getmtime(file_path) <= 300:
+                        try:
+                            with open(file_path, 'r') as f:
+                                pred = json.load(f)
+                                pred['is_live'] = True
+                                predictions.append(pred)
+                        except json.JSONDecodeError:
+                            st.warning(f"Error loading live prediction file: {file}")
+                        except Exception as e:
+                            st.error(f"Unexpected error loading {file}: {str(e)}")
     
     # Sort predictions by date/time
     predictions.sort(key=lambda x: x['game_info'].get('scheduled_start', ''))
@@ -309,10 +330,13 @@ def main():
     
     # Sidebar
     st.sidebar.title("Controls")
-    auto_update = st.sidebar.checkbox("Auto Update (1 min)", value=True)
+    auto_update = st.sidebar.checkbox("Auto Update (5 min)", value=True)
     manual_update = st.sidebar.button("Manual Update")
     
-    if manual_update or (auto_update and time.time() % 60 < 1):
+    # Clean old predictions before loading new ones
+    clean_old_predictions()
+    
+    if manual_update or (auto_update and time.time() % 300 < 1):
         with st.spinner("Updating predictions..."):
             api_client = EnhancedNBAApiClient('89ce3afd40msh6fe1b4a34da6f2ep1f2bcdjsn4a84afd6514c')
             base_predictor = NBAPredictor('saved_models')
@@ -423,14 +447,14 @@ def main():
     st.markdown("---")
     st.markdown(f"*Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
     
-    # Auto-refresh JavaScript
+    # Update auto-refresh JavaScript to 5 minutes
     if auto_update:
         st.markdown(
             """
             <script>
                 var timeout = setTimeout(function() {
                     window.location.reload();
-                }, 60000);
+                }, 300000);  // 300000 ms = 5 minutes
             </script>
             """,
             unsafe_allow_html=True
