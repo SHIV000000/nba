@@ -10,6 +10,15 @@ from prediction_service import NBAPredictor
 from typing import Dict, Any, List
 from datetime import datetime, timedelta
 from typing import Optional
+import time
+import atexit
+import logging
+from datetime import datetime, timedelta
+
+import atexit
+import shutil
+import threading
+from datetime import datetime, timedelta
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -173,51 +182,60 @@ class LiveGamePredictor:
             logging.warning(f"Error adjusting prediction: {str(e)}")
             return base_pred
 
-def run_continuous_predictions():
+def run_continuous_predictions(timeout_minutes=3):
+    """Run predictions with timeout"""
     api_key = '89ce3afd40msh6fe1b4a34da6f2ep1f2bcdjsn4a84afd6514c'
     api_client = EnhancedNBAApiClient(api_key)
     base_predictor = NBAPredictor('saved_models')
     live_predictor = LiveGamePredictor(base_predictor)
     
+    start_time = time.time()
     update_interval = 30
     
-    while True:
-        try:
+    try:
+        while True:
+            # Check if timeout has been reached
+            if time.time() - start_time > (timeout_minutes * 60):
+                logging.info(f"Prediction service timeout reached ({timeout_minutes} minutes)")
+                break
+                
             live_games = api_client.get_live_games()
+            predictions_made = False
             
-            if not live_games:
-                logging.info("No live games found. Checking today's schedule...")
+            if live_games:
+                for game in live_games:
+                    try:
+                        game_info = prepare_game_info(game, api_client)
+                        prediction = live_predictor.predict_live_game(game_info)
+                        
+                        # Save to live predictions directory
+                        save_prediction(game_info, prediction, is_live=True)
+                        log_prediction(game_info, prediction)
+                        predictions_made = True
+                    except Exception as e:
+                        logging.error(f"Error processing game {game.get('id')}: {str(e)}")
+                        continue
+            else:
                 today_games = get_todays_schedule(api_client)
-                
                 if today_games:
-                    logging.info(f"Found {len(today_games)} scheduled games for today")
                     process_scheduled_games(today_games, api_client, live_predictor)
+                    predictions_made = True
                 else:
-                    logging.info("No games scheduled for today")
-                
-                sleep(update_interval)
-                continue
-                
-            for game in live_games:
-                try:
-                    game_info = prepare_game_info(game, api_client)
-                    prediction = live_predictor.predict_live_game(game_info)
-                    
-                    save_prediction(game_info, prediction)
-                    log_prediction(game_info, prediction)
-                    
-                except Exception as e:
-                    logging.error(f"Error processing game {game.get('id')}: {str(e)}")
-                    continue
-                    
-            sleep(update_interval)
+                    logging.info("No games found")
             
-        except KeyboardInterrupt:
-            logging.info("Stopping prediction service...")
-            break
-        except Exception as e:
-            logging.error(f"Error in prediction loop: {str(e)}")
-            sleep(update_interval)
+            if predictions_made:
+                logging.info("Predictions completed successfully")
+                break
+            
+            # Sleep for shorter interval to allow for more responsive timeout
+            time.sleep(min(update_interval, 10))
+            
+    except Exception as e:
+        logging.error(f"Error in prediction service: {str(e)}")
+        return False
+    finally:
+        logging.info("Prediction service stopped")
+        return True
 
 def prepare_game_info(game: Dict, api_client: EnhancedNBAApiClient) -> Dict:
     """Prepare comprehensive game information."""
@@ -313,10 +331,15 @@ def log_prediction(game_info: Dict, prediction: Dict):
     =====================================
     """)
 
-def save_prediction(game_info: Dict, prediction: Dict):
+def save_prediction(game_info: Dict, prediction: Dict, is_live: bool = True):
     """Save prediction with timestamp."""
     try:
         timestamp = datetime.now()
+        
+        # Calculate predicted winner
+        home_win_prob = prediction['adjusted_prediction']
+        predicted_winner = game_info['home_team'] if home_win_prob > 0.5 else game_info['away_team']
+        win_probability = home_win_prob if home_win_prob > 0.5 else (1 - home_win_prob)
         
         result = {
             'timestamp': timestamp.isoformat(),
@@ -334,16 +357,18 @@ def save_prediction(game_info: Dict, prediction: Dict):
             'prediction': {
                 'base': float(prediction['base_prediction']),
                 'adjusted': float(prediction['adjusted_prediction']),
+                'predicted_winner': predicted_winner,
+                'win_probability': float(win_probability),
                 'factors': prediction['factors'],
                 'models': prediction['model_predictions']
-            }
+            },
+            'is_live': is_live
         }
         
-        # Create predictions directory if it doesn't exist
-        os.makedirs('predictions', exist_ok=True)
+        directory = 'predictions/live' if is_live else 'predictions/scheduled'
+        os.makedirs(directory, exist_ok=True)
         
-        # Save to file with timestamp
-        filename = f'predictions/game_{game_info["gameId"]}_{timestamp.strftime("%Y%m%d_%H%M%S")}.json'
+        filename = f'{directory}/game_{game_info["gameId"]}_{timestamp.strftime("%Y%m%d_%H%M%S")}.json'
         with open(filename, 'w') as f:
             json.dump(result, f, indent=4)
             
