@@ -35,7 +35,7 @@ mdurl==0.1.2
 ml-dtypes==0.4.1
 namex==0.0.8
 narwhals==1.13.3
-networkx==3.4.2
+networkx
 numpy==2.0.2
 opt_einsum==3.4.0
 optree==0.13.0
@@ -55,7 +55,7 @@ requests==2.32.3
 rich==13.9.4
 rpds-py==0.21.0
 scikit-learn==1.5.2
-scipy==1.14.1
+scipy
 seaborn==0.13.2
 setuptools==75.3.0
 six==1.16.0
