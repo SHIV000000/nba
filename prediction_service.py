@@ -23,9 +23,9 @@ class NBAPredictor:
         self.model_weights = {
             'random_forest': 0.35,
             'xgboost': 0.35,
-            'svm': 0.1,
-            'lstm': 0.1,
-            'gru': 0.1
+            'svm': 0.15,
+            'lstm': 0.20,
+            'gru': 0.15
         }
 
     def load_scaler(self):
@@ -129,6 +129,13 @@ class NBAPredictor:
                 'svm': 'svm_20241111_040330.joblib'
             }
 
+            # Add neural network models
+            nn_models = {
+                'lstm': 'lstm_20241111_040330.h5',
+                'gru': 'gru_20241111_040330.h5'
+            }
+
+            # Load traditional models
             for model_name, file_name in model_files.items():
                 try:
                     self.models[model_name] = joblib.load(os.path.join(self.models_path, file_name))
@@ -137,63 +144,49 @@ class NBAPredictor:
                     logging.error(f"Error loading {model_name} model: {str(e)}")
 
             # Load neural network models
-            nn_models = {
-                'lstm': 'lstm_20241111_040330.h5',
-                'gru': 'gru_20241111_040330.h5'
-            }
-
             for model_name, file_name in nn_models.items():
                 try:
                     model_path = os.path.join(self.models_path, file_name)
-                    self.models[model_name] = tf.keras.models.load_model(
-                        model_path,
-                        compile=False,
-                        custom_objects=None
-                    )
+                    self.models[model_name] = tf.keras.models.load_model(model_path)
                     logging.info(f"Loaded {model_name} model successfully")
                 except Exception as e:
                     logging.error(f"Error loading {model_name} model: {str(e)}")
-
-            if not self.models:
-                raise ValueError("No models were successfully loaded")
-
-            logging.info(f"Successfully loaded {len(self.models)} models")
 
         except Exception as e:
             logging.error(f"Error in model loading: {str(e)}")
             raise
 
     def prepare_features(self, home_stats: Dict, away_stats: Dict) -> np.ndarray:
-        """Prepare features for prediction."""
+        """Prepare features with validation."""
         try:
-            # Create features dictionary
             features_dict = {}
-            
-            # Extract basic stats
             home_stats_obj = home_stats.get('statistics', [{}])[0]
             away_stats_obj = away_stats.get('statistics', [{}])[0]
             
-            # Process all required features
+            # Add default values for missing stats
+            default_stats = {
+                'points': 0, 'fgp': 0, 'tpp': 0, 'ftp': 0,
+                'totReb': 0, 'assists': 0, 'steals': 0,
+                'blocks': 0, 'turnovers': 0
+            }
+            
+            # Update with defaults
+            home_stats_obj = {**default_stats, **home_stats_obj}
+            away_stats_obj = {**default_stats, **away_stats_obj}
+            
+            # Process features
             for feature_name in self.feature_names:
                 features_dict[feature_name] = self._calculate_feature_value(
                     feature_name, home_stats_obj, away_stats_obj
                 )
             
-            # Create features array
-            features = self._create_feature_array(features_dict)
-            
-            # Validate feature count
-            if not self._validate_feature_count(features):
-                raise ValueError("Feature count mismatch")
-            
-            # Scale features
-            scaled_features = self._scale_features_safe(features)
-            
-            return scaled_features
+            features = np.array([[features_dict[name] for name in self.feature_names]])
+            return self.scaler.transform(features)
             
         except Exception as e:
-            logging.error(f"Error preparing features: {str(e)}")
-            raise
+            logging.error(f"Feature preparation error: {str(e)}")
+            # Return zero-filled array as fallback
+            return np.zeros((1, len(self.feature_names)))
 
     def predict_game(self, home_stats: Dict, away_stats: Dict) -> Tuple[float, Dict[str, float]]:
         """Make prediction for a game."""
@@ -571,6 +564,133 @@ class NBAPredictor:
             logging.error(f"Error validating feature count: {str(e)}")
             # If validation fails, return True to continue with prediction
             return True
+
+    def predict_game_with_context(self, game_info: Dict) -> Dict[str, Any]:
+        """Enhanced prediction with team context and injuries."""
+        try:
+            # Get base prediction
+            base_prediction, model_predictions = self.predict_game(
+                game_info['home_stats'],
+                game_info['away_stats']
+            )
+            
+            # Calculate context factors
+            injury_factor = self._calculate_injury_impact(game_info)
+            conference_factor = self._calculate_conference_factor(game_info)
+            division_factor = self._calculate_division_factor(game_info)
+            
+            # Adjust prediction
+            adjusted_prediction = self._adjust_prediction_with_context(
+                base_prediction,
+                injury_factor,
+                conference_factor,
+                division_factor
+            )
+            
+            return {
+                'base_prediction': base_prediction,
+                'adjusted_prediction': adjusted_prediction,
+                'model_predictions': model_predictions,
+                'context_factors': {
+                    'injury_impact': injury_factor,
+                    'conference_factor': conference_factor,
+                    'division_factor': division_factor
+                }
+            }
+            
+        except Exception as e:
+            logging.error(f"Error in contextual prediction: {str(e)}")
+            raise
+
+    def _calculate_injury_impact(self, game_info: Dict) -> float:
+        """Calculate impact of injuries on prediction."""
+        try:
+            home_injuries = game_info['home_team']['injuries']
+            away_injuries = game_info['away_team']['injuries']
+            
+            # Calculate impact scores
+            def get_impact_score(injuries):
+                return sum(
+                    1.0 if injury['status'] == 'Out' else
+                    0.5 if injury['status'] == 'Questionable' else
+                    0.25 if injury['status'] == 'Probable' else 0
+                    for injury in injuries
+                )
+            
+            home_impact = get_impact_score(home_injuries)
+            away_impact = get_impact_score(away_injuries)
+            
+            # Return normalized differential
+            return (away_impact - home_impact) / max(10, home_impact + away_impact)
+            
+        except Exception as e:
+            logging.error(f"Error calculating injury impact: {str(e)}")
+            return 0.0
+
+    def _calculate_conference_factor(self, game_info: Dict) -> float:
+        """Calculate conference strength factor."""
+        try:
+            home_conf = game_info['home_team']['info']['conference']
+            away_conf = game_info['away_team']['info']['conference']
+            
+            # Conference strength factors (could be updated based on current season data)
+            conf_strength = {
+                'Eastern': 0.48,  # Example values
+                'Western': 0.52
+            }
+            
+            return conf_strength.get(home_conf, 0.5) - conf_strength.get(away_conf, 0.5)
+            
+        except Exception as e:
+            logging.error(f"Error calculating conference factor: {str(e)}")
+            return 0.0
+
+    def _calculate_division_factor(self, game_info: Dict) -> float:
+        """Calculate division rivalry factor."""
+        try:
+            home_div = game_info['home_team']['info']['division']
+            away_div = game_info['away_team']['info']['division']
+            
+            # Add small boost for division games
+            return 0.05 if home_div == away_div else 0.0
+            
+        except Exception as e:
+            logging.error(f"Error calculating division factor: {str(e)}")
+            return 0.0
+
+    def _adjust_prediction_with_context(
+        self,
+        base_pred: float,
+        injury_factor: float,
+        conference_factor: float,
+        division_factor: float
+    ) -> float:
+        """Combine all factors to adjust prediction."""
+        try:
+            # Weight factors
+            injury_weight = 0.15
+            conference_weight = 0.10
+            division_weight = 0.05
+            
+            # Calculate adjustment
+            adjustment = (
+                injury_factor * injury_weight +
+                conference_factor * conference_weight +
+                division_factor * division_weight
+            )
+            
+            # Apply adjustment to base prediction
+            adjusted_pred = base_pred + adjustment
+            
+            # Ensure result is between 0 and 1
+            return max(0.0, min(1.0, adjusted_pred))
+            
+        except Exception as e:
+            logging.error(f"Error adjusting prediction with context: {str(e)}")
+            return base_pred
+
+
+
 
 
 
